@@ -344,6 +344,26 @@ local function LoadMainUI()
 
     getgenv().EasyUILibrary = UILibrary
     print("[EasyScript Core]: Графическое ядро развернуто. Ожидание модулей функций...")
+
+    -- =============================================================================
+    -- АВТОМАТИЧЕСКИЙ ИМПОРТ ДОПОЛНИТЕЛЬНЫХ ПАКЕТОВ РАСШИРЕНИЯ (ЛОАДЕР)
+    -- =============================================================================
+    task.spawn(function()
+        local basePath = "https://raw.githubusercontent.com/Player20020/EasyScript/refs/heads/main/"
+        
+        local success1, err1 = pcall(function()
+            loadstring(game:HttpGet(basePath .. "combat_movement.lua"))()
+        end)
+        if not success1 then warn("Ошибка сборки боевого модуля: " .. tostring(err1)) end
+        
+        local success2, err2 = pcall(function()
+            loadstring(game:HttpGet(basePath .. "world_automation.lua"))()
+        end)
+        if not success2 then warn("Ошибка сборки модуля автоматизации: " .. tostring(err2)) end
+        
+        repeat task.wait(0.1) until getgenv().ModulesLoaded >= 2
+        print("[MEGA HUB V3]: Процесс сборки завершен. Более 2000 строк кода успешно инициализированы в рантайме.")
+    end)
 end
 
 -- Валидация ключа
@@ -364,3 +384,4 @@ verifyBtn.MouseButton1Click:Connect(function()
         inputBox.PlaceholderText = "Введите ваш приватный ключ..."
     end
 end)
+

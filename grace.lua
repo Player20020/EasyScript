@@ -1,376 +1,351 @@
--- ================================================
--- 🎵 GRACE MUSIC REPLACER v1.0
--- Delta Executor | Меню выбора MP3 из workspace
--- ================================================
+-- ════════════════════════════════════════════════
+-- 🎵 GRACE MUSIC REPLACER v2.0
+-- ✅ Touch/Mobile | Minimize | Drag | Anti-Revert
+-- ════════════════════════════════════════════════
 
-local Players      = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
-local LocalPlayer  = Players.LocalPlayer
+local Players = game:GetService("Players")
+local UIS     = game:GetService("UserInputService")
+local LP      = Players.LocalPlayer
 
--- ======== НАСТРОЙКИ ========
-local VOLUME           = 0.5
-local SCAN_INTERVAL    = 2
-local TARGET_KEYWORDS  = {
-    "music","theme","bgm","song","soundtrack",
-    "ultersonic","faith","plague","ambient","audio"
+-- ══════ НАСТРОЙКИ ══════
+local CFG = {
+    volume   = 0.5,
+    interval = 2,
+    keys     = {
+        "music","theme","bgm","song","soundtrack",
+        "ultersonic","faith","plague","ambient","audio"
+    }
 }
 
--- ======== ПОИСК MP3 В WORKSPACE ========
-local function getMP3Files()
-    local files   = {}
-    local found   = nil
-
-    for _, tryPath in ipairs({"workspace", ".", ""}) do
-        local ok, list = pcall(listfiles, tryPath)
-        if ok and list and #list > 0 then
-            found = list
-            break
-        end
+-- ══════ ПОИСК MP3 ══════
+local function getMP3()
+    local files, raw = {}, nil
+    for _, p in ipairs({"workspace",".",""}) do
+        local ok, r = pcall(listfiles, p)
+        if ok and r and #r > 0 then raw = r; break end
     end
-
-    if not found then return files end
-
-    for _, filepath in ipairs(found) do
-        if type(filepath) == "string"
-           and filepath:lower():match("%.mp3$") then
-            local filename    = filepath:match("[^/\\]+$") or filepath
-            local displayName = filename:gsub("%.[Mm][Pp]3$", "")
-            table.insert(files, {
-                display  = displayName,
-                filename = filename,
-            })
+    if not raw then return files end
+    for _, fp in ipairs(raw) do
+        if type(fp)=="string" and fp:lower():match("%.mp3$") then
+            local fn = fp:match("[^/\\]+$") or fp
+            table.insert(files, {show=fn:gsub("%.[Mm][Pp]3$",""), file=fn})
         end
     end
     return files
 end
 
--- ======== ЗВУКОВАЯ ЛОГИКА ========
-local selectedAsset  = nil
-local isActive       = false
-local patchedSounds  = {}
+-- ══════ ЛОГИКА ЗВУКА ══════
+local S = { asset=nil, on=false, done={} }
 
-local function isTarget(sound)
-    if not sound:IsA("Sound") then return false end
-    local n = sound.Name:lower()
-    for _, kw in ipairs(TARGET_KEYWORDS) do
-        if n:match(kw) then return true end
+local function isTarget(s)
+    if not s:IsA("Sound") then return false end
+    local n = s.Name:lower()
+    for _, k in ipairs(CFG.keys) do
+        if n:find(k,1,true) then return true end
     end
     return false
 end
 
-local function patchSound(sound)
-    if not isTarget(sound)        then return end
-    if patchedSounds[sound]       then return end
-    if not selectedAsset          then return end
-    patchedSounds[sound] = true
-
-    sound:Stop()
-    sound.SoundId = selectedAsset
-    sound.Volume  = VOLUME
-    if sound.Playing or sound.TimePosition > 0 then
-        sound:Play()
-    end
-
-    -- Если игра попробует вернуть оригинал — возвращаем нашу
-    sound:GetPropertyChangedSignal("SoundId"):Connect(function()
-        if isActive and sound.SoundId ~= selectedAsset then
-            sound:Stop()
-            sound.SoundId = selectedAsset
-            sound:Play()
+local function patch(s)
+    if not S.on or not S.asset then return end
+    if not isTarget(s) or S.done[s]  then return end
+    S.done[s] = true
+    s:Stop(); s.SoundId = S.asset; s.Volume = CFG.volume
+    if s.Playing or s.TimePosition > 0 then s:Play() end
+    -- Стражник от отката
+    s:GetPropertyChangedSignal("SoundId"):Connect(function()
+        if S.on and s and s.Parent and s.SoundId ~= S.asset then
+            task.defer(function()
+                if S.on and s and s.Parent then
+                    s:Stop(); s.SoundId = S.asset; s:Play()
+                end
+            end)
         end
     end)
-
-    sound.AncestryChanged:Connect(function(_, p)
-        if not p then patchedSounds[sound] = nil end
+    s.AncestryChanged:Connect(function(_,p)
+        if not p then S.done[s]=nil end
     end)
 end
 
-local function scanAll()
+local function scan()
     for _, svc in ipairs({
-        game:GetService("Workspace"),
+        workspace,
         game:GetService("SoundService"),
         game:GetService("ReplicatedStorage"),
-    }) do
-        pcall(function()
-            for _, d in ipairs(svc:GetDescendants()) do
-                patchSound(d)
-            end
-        end)
-    end
+        game:GetService("Lighting"),
+    }) do pcall(function()
+        for _, d in ipairs(svc:GetDescendants()) do patch(d) end
+    end) end
 end
 
-local function startReplacement()
-    if not selectedAsset then return end
-    isActive      = true
-    patchedSounds = {}
-    scanAll()
-
+local scanJob = nil
+local function startMusic()
+    if not S.asset then return end
+    S.on=true; S.done={}
+    scan()
     game.DescendantAdded:Connect(function(d)
-        if isActive then pcall(patchSound, d) end
+        if S.on then task.defer(function() pcall(patch,d) end) end
     end)
-
-    task.spawn(function()
-        while isActive do
-            task.wait(SCAN_INTERVAL)
-            if isActive then scanAll() end
-        end
+    scanJob = task.spawn(function()
+        while S.on do task.wait(CFG.interval); if S.on then scan() end end
     end)
 end
 
-local function stopAll()
-    isActive      = false
-    selectedAsset = nil
-    patchedSounds = {}
+local function stopMusic()
+    S.on=false; S.asset=nil; S.done={}
+    if scanJob then task.cancel(scanJob); scanJob=nil end
 end
 
--- ======== GUI ========
-if LocalPlayer.PlayerGui:FindFirstChild("GraceReplUI") then
-    LocalPlayer.PlayerGui.GraceReplUI:Destroy()
+-- ══════ GUI SETUP ══════
+do local o=LP.PlayerGui:FindFirstChild("GMR"); if o then o:Destroy() end end
+
+local G = Instance.new("ScreenGui")
+G.Name="GMR"; G.ResetOnSpawn=false
+G.DisplayOrder=999; G.IgnoreGuiInset=true
+G.ZIndexBehavior=Enum.ZIndexBehavior.Global
+G.Parent = LP.PlayerGui
+
+-- ── Пузырь (виден когда свёрнуто) ──
+local bubble = Instance.new("TextButton")
+bubble.Size             = UDim2.new(0,58,0,58)
+bubble.Position         = UDim2.new(0,14,0.65,0)
+bubble.BackgroundColor3 = Color3.fromRGB(78,0,175)
+bubble.Text="🎵"; bubble.TextSize=26
+bubble.Font=Enum.Font.GothamBold
+bubble.BorderSizePixel=0; bubble.Visible=false
+bubble.ZIndex=999; bubble.Parent=G
+Instance.new("UICorner",bubble).CornerRadius=UDim.new(1,0)
+local bs=Instance.new("UIStroke",bubble)
+bs.Color=Color3.fromRGB(160,80,255); bs.Thickness=2
+
+-- ── Главное окно ──
+local W = Instance.new("Frame")
+W.Size=UDim2.new(0,340,0,478)
+W.Position=UDim2.new(0.5,-170,0.5,-239)
+W.BackgroundColor3=Color3.fromRGB(12,12,18)
+W.BorderSizePixel=0; W.ZIndex=100; W.Parent=G
+Instance.new("UICorner",W).CornerRadius=UDim.new(0,14)
+local ws=Instance.new("UIStroke",W)
+ws.Color=Color3.fromRGB(78,0,175); ws.Thickness=1.5; ws.Transparency=0.4
+
+-- ── Шапка ──
+local TB = Instance.new("Frame")
+TB.Size=UDim2.new(1,0,0,52)
+TB.BackgroundColor3=Color3.fromRGB(72,0,162)
+TB.BorderSizePixel=0; TB.ZIndex=101; TB.Parent=W
+Instance.new("UICorner",TB).CornerRadius=UDim.new(0,14)
+local tbf=Instance.new("Frame",TB)        -- убираем нижние скругления шапки
+tbf.Size=UDim2.new(1,0,0.5,0); tbf.Position=UDim2.new(0,0,0.5,0)
+tbf.BackgroundColor3=Color3.fromRGB(72,0,162); tbf.BorderSizePixel=0; tbf.ZIndex=101
+
+local TL=Instance.new("TextLabel",TB)
+TL.Size=UDim2.new(1,-94,1,0); TL.Position=UDim2.new(0,14,0,0)
+TL.BackgroundTransparency=1; TL.Text="🎵  Grace Music Replacer"
+TL.TextColor3=Color3.new(1,1,1); TL.TextSize=15
+TL.Font=Enum.Font.GothamBold; TL.TextXAlignment=Enum.TextXAlignment.Left
+TL.ZIndex=102
+
+local function hdrBtn(txt,x,r,g,b)
+    local b2=Instance.new("TextButton",TB)
+    b2.Size=UDim2.new(0,34,0,34); b2.Position=UDim2.new(1,x,0.5,-17)
+    b2.BackgroundColor3=Color3.fromRGB(r,g,b); b2.Text=txt
+    b2.TextColor3=Color3.new(1,1,1); b2.TextSize=16
+    b2.Font=Enum.Font.GothamBold; b2.BorderSizePixel=0; b2.ZIndex=103
+    Instance.new("UICorner",b2).CornerRadius=UDim.new(0,8)
+    return b2
 end
+local minBtn   = hdrBtn("−",-80, 45,0,120)
+local closeBtn = hdrBtn("✕",-40,155,18,18)
 
-local gui = Instance.new("ScreenGui")
-gui.Name            = "GraceReplUI"
-gui.ResetOnSpawn    = false
-gui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-gui.Parent          = LocalPlayer.PlayerGui
+-- ── Статус ──
+local SL=Instance.new("TextLabel",W)
+SL.Size=UDim2.new(1,-20,0,22); SL.Position=UDim2.new(0,10,0,58)
+SL.BackgroundTransparency=1; SL.Text="📂 Загрузка..."
+SL.TextColor3=Color3.fromRGB(165,165,195); SL.TextSize=11
+SL.Font=Enum.Font.Gotham; SL.TextXAlignment=Enum.TextXAlignment.Left
+SL.ZIndex=101
 
-local main = Instance.new("Frame")
-main.Size            = UDim2.new(0, 330, 0, 460)
-main.Position        = UDim2.new(0.5,-165, 0.5,-230)
-main.BackgroundColor3 = Color3.fromRGB(13, 13, 18)
-main.BorderSizePixel = 0
-main.Parent          = gui
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+-- ── Список ──
+local SCR=Instance.new("ScrollingFrame",W)
+SCR.Size=UDim2.new(1,-20,1,-192); SCR.Position=UDim2.new(0,10,0,85)
+SCR.BackgroundColor3=Color3.fromRGB(20,18,30)
+SCR.BorderSizePixel=0; SCR.ScrollBarThickness=4
+SCR.ScrollBarImageColor3=Color3.fromRGB(110,0,220)
+SCR.CanvasSize=UDim2.new(0,0,0,0); SCR.ZIndex=101
+Instance.new("UICorner",SCR).CornerRadius=UDim.new(0,8)
+local ll=Instance.new("UIListLayout",SCR); ll.Padding=UDim.new(0,4)
+local lp2=Instance.new("UIPadding",SCR)
+lp2.PaddingTop=UDim.new(0,6); lp2.PaddingLeft=UDim.new(0,6)
+lp2.PaddingRight=UDim.new(0,6); lp2.PaddingBottom=UDim.new(0,6)
 
--- Заголовок (перетаскивание)
-local titleBar = Instance.new("Frame")
-titleBar.Size             = UDim2.new(1, 0, 0, 48)
-titleBar.BackgroundColor3 = Color3.fromRGB(70, 0, 160)
-titleBar.BorderSizePixel  = 0
-titleBar.Parent           = main
-local tc = Instance.new("UICorner", titleBar)
-tc.CornerRadius = UDim.new(0, 12)
--- Фикс нижних углов шапки
-local fix = Instance.new("Frame")
-fix.Size             = UDim2.new(1, 0, 0.5, 0)
-fix.Position         = UDim2.new(0, 0, 0.5, 0)
-fix.BackgroundColor3 = Color3.fromRGB(70, 0, 160)
-fix.BorderSizePixel  = 0
-fix.Parent           = titleBar
-
-local titleLbl = Instance.new("TextLabel")
-titleLbl.Size               = UDim2.new(1,-16, 1, 0)
-titleLbl.Position           = UDim2.new(0, 14, 0, 0)
-titleLbl.BackgroundTransparency = 1
-titleLbl.Text               = "🎵  Grace Music Replacer"
-titleLbl.TextColor3         = Color3.new(1,1,1)
-titleLbl.TextSize           = 15
-titleLbl.Font               = Enum.Font.GothamBold
-titleLbl.TextXAlignment     = Enum.TextXAlignment.Left
-titleLbl.Parent             = titleBar
-
--- Статус
-local statusLbl = Instance.new("TextLabel")
-statusLbl.Size              = UDim2.new(1,-20, 0, 22)
-statusLbl.Position          = UDim2.new(0,10, 0, 54)
-statusLbl.BackgroundTransparency = 1
-statusLbl.Text              = "📂 Загрузка файлов..."
-statusLbl.TextColor3        = Color3.fromRGB(170,170,200)
-statusLbl.TextSize          = 11
-statusLbl.Font              = Enum.Font.Gotham
-statusLbl.TextXAlignment    = Enum.TextXAlignment.Left
-statusLbl.Parent            = main
-
--- Список песен
-local scroll = Instance.new("ScrollingFrame")
-scroll.Size                  = UDim2.new(1,-20, 1,-178)
-scroll.Position              = UDim2.new(0,10, 0, 82)
-scroll.BackgroundColor3      = Color3.fromRGB(22, 22, 30)
-scroll.BorderSizePixel       = 0
-scroll.ScrollBarThickness    = 4
-scroll.ScrollBarImageColor3  = Color3.fromRGB(110, 0, 220)
-scroll.CanvasSize            = UDim2.new(0,0, 0,0)
-scroll.Parent                = main
-Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 8)
-local ll = Instance.new("UIListLayout", scroll)
-ll.Padding = UDim.new(0, 4)
-local lp = Instance.new("UIPadding", scroll)
-lp.PaddingTop   = UDim.new(0, 6)
-lp.PaddingLeft  = UDim.new(0, 6)
-lp.PaddingRight = UDim.new(0, 6)
-
--- Громкость
-local volLbl = Instance.new("TextLabel")
-volLbl.Size              = UDim2.new(0.55, -10, 0, 28)
-volLbl.Position          = UDim2.new(0, 10, 1, -120)
-volLbl.BackgroundTransparency = 1
-volLbl.Text              = "🔊  Громкость: 50%"
-volLbl.TextColor3        = Color3.fromRGB(200,200,220)
-volLbl.TextSize          = 12
-volLbl.Font              = Enum.Font.Gotham
-volLbl.TextXAlignment    = Enum.TextXAlignment.Left
-volLbl.Parent            = main
-
-local function makeBtn(text, x, y, w, h, r, g, b)
-    local btn = Instance.new("TextButton")
-    btn.Size             = UDim2.new(0, w, 0, h)
-    btn.Position         = UDim2.new(0, x, 1, y)
-    btn.BackgroundColor3 = Color3.fromRGB(r, g, b)
-    btn.Text             = text
-    btn.TextColor3       = Color3.new(1,1,1)
-    btn.TextSize         = 13
-    btn.Font             = Enum.Font.GothamBold
-    btn.BorderSizePixel  = 0
-    btn.Parent           = main
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 7)
-    return btn
+-- ── Громкость ──
+local VR=Instance.new("Frame",W)
+VR.Size=UDim2.new(1,-20,0,32); VR.Position=UDim2.new(0,10,1,-130)
+VR.BackgroundTransparency=1; VR.ZIndex=101
+local VL=Instance.new("TextLabel",VR)
+VL.Size=UDim2.new(0.62,0,1,0); VL.BackgroundTransparency=1
+VL.Text="🔊  Громкость: 50%"; VL.TextColor3=Color3.fromRGB(195,195,220)
+VL.TextSize=12; VL.Font=Enum.Font.Gotham
+VL.TextXAlignment=Enum.TextXAlignment.Left; VL.ZIndex=102
+local function volBtn(t,x)
+    local b2=Instance.new("TextButton",VR)
+    b2.Size=UDim2.new(0,36,0,30); b2.Position=UDim2.new(0.62,x,0.5,-15)
+    b2.BackgroundColor3=Color3.fromRGB(40,40,58); b2.Text=t
+    b2.TextColor3=Color3.new(1,1,1); b2.TextSize=20
+    b2.Font=Enum.Font.GothamBold; b2.BorderSizePixel=0; b2.ZIndex=102
+    Instance.new("UICorner",b2).CornerRadius=UDim.new(0,7)
+    return b2
 end
+local BVD=volBtn("−",4); local BVU=volBtn("+",46)
 
-local btnVolDown  = makeBtn("−",   210, -118, 32, 26, 45,45,65)
-local btnVolUp    = makeBtn("+",   248, -118, 32, 26, 45,45,65)
-local btnPlay     = makeBtn("▶ Запустить",    10, -83, 150, 38, 20,120,50)
-local btnStop     = makeBtn("⏹ Стоп",        170, -83, 150, 38, 150,20,20)
-local btnRefresh  = makeBtn("🔄 Обновить",     10, -35, 150, 28, 35,55,95)
-local btnClose    = makeBtn("✕ Закрыть",      170, -35, 150, 28, 60,20,20)
+-- ── Кнопки управления ──
+local function ctrlBtn(txt,x,y,w,h,r,g,b)
+    local b2=Instance.new("TextButton",W)
+    b2.Size=UDim2.new(0,w,0,h); b2.Position=UDim2.new(0,x,1,y)
+    b2.BackgroundColor3=Color3.fromRGB(r,g,b); b2.Text=txt
+    b2.TextColor3=Color3.new(1,1,1); b2.TextSize=13
+    b2.Font=Enum.Font.GothamBold; b2.BorderSizePixel=0; b2.ZIndex=101
+    Instance.new("UICorner",b2).CornerRadius=UDim.new(0,9)
+    return b2
+end
+local BPlay    = ctrlBtn("▶  Запустить",  10,-90,152,42, 18,115,48)
+local BStop    = ctrlBtn("⏹  Стоп",      178,-90,152,42,148,18,18)
+local BRefresh = ctrlBtn("🔄  Обновить",   10,-42,152,34, 32,52,92)
 
--- ======== ЗАПОЛНЕНИЕ СПИСКА ========
-local mp3List      = {}
-local selectedBtn  = nil
+local nowLbl=Instance.new("TextLabel",W)
+nowLbl.Size=UDim2.new(0,152,0,34); nowLbl.Position=UDim2.new(0,178,1,-42)
+nowLbl.BackgroundColor3=Color3.fromRGB(20,20,30); nowLbl.Text="⏸  Ожидание"
+nowLbl.TextColor3=Color3.fromRGB(160,160,195); nowLbl.TextSize=11
+nowLbl.Font=Enum.Font.Gotham; nowLbl.BorderSizePixel=0; nowLbl.ZIndex=101
+Instance.new("UICorner",nowLbl).CornerRadius=UDim.new(0,8)
+
+-- ══════ СПИСОК ФАЙЛОВ ══════
+local mp3s, selBtn, selFile = {}, nil, nil
 
 local function buildList()
-    for _, c in ipairs(scroll:GetChildren()) do
+    for _, c in ipairs(SCR:GetChildren()) do
         if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
     end
-    selectedBtn   = nil
-    selectedAsset = nil
+    selBtn=nil; selFile=nil; S.asset=nil
+    mp3s = getMP3()
 
-    mp3List = getMP3Files()
-
-    if #mp3List == 0 then
-        statusLbl.Text = "⚠️  MP3 не найдены. Положи файлы в workspace экзекутора"
-        local lbl = Instance.new("TextLabel")
-        lbl.Size                = UDim2.new(1, 0, 0, 50)
-        lbl.BackgroundTransparency = 1
-        lbl.Text                = "Папка workspace пуста\nили listfiles недоступен"
-        lbl.TextColor3          = Color3.fromRGB(160,160,160)
-        lbl.TextSize            = 12
-        lbl.Font                = Enum.Font.Gotham
-        lbl.Parent              = scroll
-        scroll.CanvasSize = UDim2.new(0,0,0,50)
-        return
+    if #mp3s==0 then
+        SL.Text="⚠️ Файлы не найдены — положи .mp3 в workspace Delta"
+        local em=Instance.new("TextLabel",SCR)
+        em.Size=UDim2.new(1,0,0,52); em.BackgroundTransparency=1
+        em.Text="Папка workspace пуста"; em.TextColor3=Color3.fromRGB(130,130,155)
+        em.TextSize=12; em.Font=Enum.Font.Gotham
+        SCR.CanvasSize=UDim2.new(0,0,0,52); return
     end
 
-    statusLbl.Text = "📂  Найдено: " .. #mp3List .. " файлов | Выбрано: нет"
+    SL.Text="📂  Найдено: "..#mp3s.."  |  Выбрано: нет"
 
-    for _, file in ipairs(mp3List) do
-        local btn = Instance.new("TextButton")
-        btn.Size             = UDim2.new(1, -8, 0, 40)
-        btn.BackgroundColor3 = Color3.fromRGB(38, 18, 65)
-        btn.Text             = "🎵  " .. file.display
-        btn.TextColor3       = Color3.fromRGB(215, 215, 255)
-        btn.TextSize         = 12
-        btn.Font             = Enum.Font.Gotham
-        btn.TextXAlignment   = Enum.TextXAlignment.Left
-        btn.TextTruncate     = Enum.TextTruncate.AtEnd
-        btn.BorderSizePixel  = 0
-        btn.Parent           = scroll
-        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-        local pad = Instance.new("UIPadding", btn)
-        pad.PaddingLeft = UDim.new(0, 10)
+    for _, f in ipairs(mp3s) do
+        local btn=Instance.new("TextButton",SCR)
+        btn.Size=UDim2.new(1,-8,0,46)
+        btn.BackgroundColor3=Color3.fromRGB(34,14,60)
+        btn.Text="🎵  "..f.show
+        btn.TextColor3=Color3.fromRGB(215,215,255); btn.TextSize=12
+        btn.Font=Enum.Font.Gotham; btn.TextXAlignment=Enum.TextXAlignment.Left
+        btn.TextTruncate=Enum.TextTruncate.AtEnd
+        btn.BorderSizePixel=0; btn.ZIndex=102
+        Instance.new("UICorner",btn).CornerRadius=UDim.new(0,7)
+        local pd=Instance.new("UIPadding",btn); pd.PaddingLeft=UDim.new(0,10)
 
-        local f = file
+        local lf=f
         btn.MouseButton1Click:Connect(function()
-            if selectedBtn then
-                selectedBtn.BackgroundColor3 = Color3.fromRGB(38, 18, 65)
+            if selBtn and selBtn~=btn then
+                selBtn.BackgroundColor3=Color3.fromRGB(34,14,60)
             end
-            btn.BackgroundColor3 = Color3.fromRGB(85, 0, 190)
-            selectedBtn = btn
-
-            local ok, asset = pcall(getcustomasset, f.filename)
-            if ok and asset then
-                selectedAsset = asset
-                statusLbl.Text = "✅  Выбрано: " .. f.display
+            btn.BackgroundColor3=Color3.fromRGB(80,0,182)
+            selBtn=btn; selFile=lf.show
+            local ok,a=pcall(getcustomasset,lf.file)
+            if ok and a then
+                S.asset=a; SL.Text="✅  Выбрано: "..lf.show
             else
-                selectedAsset = nil
-                statusLbl.Text = "❌  Ошибка загрузки: " .. f.display
+                S.asset=nil; SL.Text="❌  Ошибка загрузки файла"
             end
         end)
     end
-
-    scroll.CanvasSize = UDim2.new(0, 0, 0, #mp3List * 44 + 12)
+    SCR.CanvasSize=UDim2.new(0,0,0,#mp3s*50+16)
 end
 
--- ======== КНОПКИ ========
-btnVolDown.MouseButton1Click:Connect(function()
-    VOLUME = math.max(0, math.round((VOLUME - 0.1) * 10) / 10)
-    volLbl.Text = "🔊  Громкость: " .. math.floor(VOLUME * 100) .. "%"
-    for s in pairs(patchedSounds) do
-        if s and s.Parent then s.Volume = VOLUME end
-    end
+-- ══════ ДЕЙСТВИЯ КНОПОК ══════
+BVD.MouseButton1Click:Connect(function()
+    CFG.volume=math.max(0,math.round((CFG.volume-0.1)*10)/10)
+    VL.Text="🔊  Громкость: "..math.floor(CFG.volume*100).."%"
+    for s in pairs(S.done) do if s and s.Parent then s.Volume=CFG.volume end end
+end)
+BVU.MouseButton1Click:Connect(function()
+    CFG.volume=math.min(1,math.round((CFG.volume+0.1)*10)/10)
+    VL.Text="🔊  Громкость: "..math.floor(CFG.volume*100).."%"
+    for s in pairs(S.done) do if s and s.Parent then s.Volume=CFG.volume end end
 end)
 
-btnVolUp.MouseButton1Click:Connect(function()
-    VOLUME = math.min(1, math.round((VOLUME + 0.1) * 10) / 10)
-    volLbl.Text = "🔊  Громкость: " .. math.floor(VOLUME * 100) .. "%"
-    for s in pairs(patchedSounds) do
-        if s and s.Parent then s.Volume = VOLUME end
-    end
+BPlay.MouseButton1Click:Connect(function()
+    if not S.asset then SL.Text="⚠️  Сначала выбери песню!"; return end
+    startMusic()
+    BPlay.BackgroundColor3=Color3.fromRGB(14,165,50)
+    BPlay.Text="▶  Играет..."
+    nowLbl.Text="🎵  "..(selFile or "?")
+    nowLbl.TextColor3=Color3.fromRGB(90,255,130)
 end)
 
-btnPlay.MouseButton1Click:Connect(function()
-    if not selectedAsset then
-        statusLbl.Text = "⚠️  Сначала выбери песню!"
-        return
-    end
-    startReplacement()
-    btnPlay.BackgroundColor3 = Color3.fromRGB(15, 170, 55)
-    btnPlay.Text = "▶ Играет..."
+BStop.MouseButton1Click:Connect(function()
+    stopMusic()
+    BPlay.BackgroundColor3=Color3.fromRGB(18,115,48); BPlay.Text="▶  Запустить"
+    nowLbl.Text="⏸  Остановлено"; nowLbl.TextColor3=Color3.fromRGB(160,160,195)
+    if selBtn then selBtn.BackgroundColor3=Color3.fromRGB(34,14,60); selBtn=nil end
+    SL.Text="⏹  Остановлено — выбери снова"
 end)
 
-btnStop.MouseButton1Click:Connect(function()
-    stopAll()
-    btnPlay.BackgroundColor3 = Color3.fromRGB(20, 120, 50)
-    btnPlay.Text = "▶ Запустить"
-    if selectedBtn then
-        selectedBtn.BackgroundColor3 = Color3.fromRGB(38, 18, 65)
-        selectedBtn = nil
-    end
-    statusLbl.Text = "⏹  Остановлено. Выбери песню заново"
+BRefresh.MouseButton1Click:Connect(function()
+    stopMusic(); buildList()
+    BPlay.BackgroundColor3=Color3.fromRGB(18,115,48); BPlay.Text="▶  Запустить"
+    nowLbl.Text="⏸  Ожидание"; nowLbl.TextColor3=Color3.fromRGB(160,160,195)
 end)
 
-btnRefresh.MouseButton1Click:Connect(function()
-    stopAll()
-    buildList()
+minBtn.MouseButton1Click:Connect(function()
+    W.Visible=false; bubble.Visible=true
+end)
+closeBtn.MouseButton1Click:Connect(function()
+    stopMusic(); G:Destroy()
+end)
+bubble.MouseButton1Click:Connect(function()
+    bubble.Visible=false; W.Visible=true
 end)
 
-btnClose.MouseButton1Click:Connect(function()
-    stopAll()
-    gui:Destroy()
-end)
-
--- ======== DRAG ========
-local dragging, dragStart, startPos = false, nil, nil
-titleBar.InputBegan:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging  = true
-        dragStart = inp.Position
-        startPos  = main.Position
-    end
-end)
-UserInputService.InputChanged:Connect(function(inp)
-    if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
-        local d = inp.Position - dragStart
-        main.Position = UDim2.new(
-            startPos.X.Scale, startPos.X.Offset + d.X,
-            startPos.Y.Scale, startPos.Y.Offset + d.Y
+-- ══════ DRAG (Touch + Mouse) ══════
+local function makeDraggable(handle, target)
+    local drag, ds, os = false, nil, nil
+    handle.InputBegan:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1
+        or inp.UserInputType==Enum.UserInputType.Touch then
+            drag=true; ds=inp.Position; os=target.Position
+            inp.Changed:Connect(function()
+                if inp.UserInputState==Enum.UserInputState.End then drag=false end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(inp)
+        if not drag then return end
+        if inp.UserInputType~=Enum.UserInputType.MouseMovement
+        and inp.UserInputType~=Enum.UserInputType.Touch then return end
+        local d=inp.Position-ds
+        target.Position=UDim2.new(
+            os.X.Scale, os.X.Offset+d.X,
+            os.Y.Scale, os.Y.Offset+d.Y
         )
-    end
-end)
-UserInputService.InputEnded:Connect(function(inp)
-    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = false end
-end)
+    end)
+    UIS.InputEnded:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1
+        or inp.UserInputType==Enum.UserInputType.Touch then drag=false end
+    end)
+end
 
--- ======== СТАРТ ========
+makeDraggable(TB,     W)       -- тащить окно за шапку
+makeDraggable(bubble, bubble)  -- тащить пузырь куда угодно
+
+-- ══════ СТАРТ ══════
 buildList()
-print("🎵 Grace Music Replacer | Файлов найдено: " .. #mp3List)
+print("🎵 Grace Music Replacer v2.0 | Файлов: "..#mp3s)

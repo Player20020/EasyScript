@@ -1,31 +1,34 @@
 -- =============================================================================
--- 👑 TITAN MUSIC MANAGER - FULL VERSION (Mobile Optimized)
+-- 👑 TITAN MUSIC MANAGER v4.0 (Premium Mobile Edition)
 -- =============================================================================
 
 local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 
--- Настройки по умолчанию
 local TitanConfig = {
     Enabled = false, 
     CurrentSong = "",
-    VolumeMultiplier = 1,
-    LoopSong = true,
-    ScanInterval = 1.0
+    VolumeMultiplier = 1.0,
+    LoopSong = true
 }
 
 local activeCustomAssets = {}
-local processedSounds = {} -- Хранит ссылки на звуки, которые мы подменили
+local trackedSounds = {}
 
--- --- ФУНКЦИИ ЯДРА ---
+-- Проверка эксплоита
+if not getcustomasset or not listfiles then
+    warn("💥 [TITAN]: Твой инжектор не поддерживает listfiles или getcustomasset!")
+    return
+end
 
+-- Фильтр MP3 файлов
 local function getMp3Files()
-    if not listfiles then return {} end
-    local files = listfiles("")
+    local files = pcall(listfiles, "") and listfiles("") or {}
     local mp3s = {}
     for _, path in ipairs(files) do
-        -- Ищем файлы, заканчивающиеся строго на .mp3
         if path:lower():match("%.mp3$") then 
             table.insert(mp3s, path) 
         end
@@ -33,133 +36,251 @@ local function getMp3Files()
     return mp3s
 end
 
--- Останавливает всю музыку, которую мы подменили
-local function stopAllManagedSounds()
-    for sound, _ in pairs(processedSounds) do
-        if sound and sound:IsA("Sound") then
-            pcall(function()
-                sound:Stop()
-                sound.TimePosition = 0
+-- Проверка, музыка ли это
+local function isGameMusic(sound)
+    if not sound:IsA("Sound") then return false end
+    local name = sound.Name:lower()
+    local keywords = {"music", "theme", "bgm", "song", "soundtrack", "ambient", "faith", "plague"}
+    for _, k in ipairs(keywords) do if name:match(k) then return true end end
+    return false
+end
+
+-- Жесткая подмена звука
+local function forcePatch(sound)
+    if not TitanConfig.Enabled or TitanConfig.CurrentSong == "" then return end
+    if not isGameMusic(sound) then return end
+
+    -- Если ассет еще не создан, создаем один раз
+    if not activeCustomAssets[TitanConfig.CurrentSong] then
+        local success, asset = pcall(function() return getcustomasset(TitanConfig.CurrentSong) end)
+        if success then activeCustomAssets[TitanConfig.CurrentSong] = asset end
+    end
+
+    local myAsset = activeCustomAssets[TitanConfig.CurrentSong]
+    if myAsset and sound.SoundId ~= myAsset then
+        sound:Stop()
+        sound.SoundId = myAsset
+        sound.Looped = TitanConfig.LoopSong
+        sound.Volume = sound.Volume * TitanConfig.VolumeMultiplier
+        sound:Play() -- Принудительный старт!
+        
+        -- Защита от попыток игры вернуть старый трек
+        if not trackedSounds[sound] then
+            trackedSounds[sound] = sound:GetPropertyChangedSignal("SoundId"):Connect(function()
+                if TitanConfig.Enabled and sound.SoundId ~= myAsset then
+                    sound:Stop()
+                    sound.SoundId = myAsset
+                    sound:Play()
+                end
             end)
         end
     end
-    processedSounds = {} 
 end
 
-local function patchSound(sound)
-    if not TitanConfig.Enabled or not sound.Playing then return end
-    if TitanConfig.CurrentSong == "" then return end
-    
-    -- Проверка: это музыка?
-    local name = sound.Name:lower()
-    local keywords = {"music", "theme", "bgm", "song", "soundtrack", "ultersonic", "faith", "plague"}
-    local isMusic = false
-    for _, k in ipairs(keywords) do if name:match(k) then isMusic = true break end end
-    if not isMusic then return end
-
-    -- Если звук уже наш — просто правим громкость, не лезем в ID
-    if processedSounds[sound] == TitanConfig.CurrentSong then 
-        sound.Volume = sound.Volume * TitanConfig.VolumeMultiplier
-        return 
-    end
-    
-    processedSounds[sound] = TitanConfig.CurrentSong
-    
-    local success, asset = pcall(function() return getcustomasset(TitanConfig.CurrentSong) end)
-    if success and asset then
-        sound:Stop()
-        sound.SoundId = asset
-        sound.Looped = TitanConfig.LoopSong
-        sound.Volume = sound.Volume * TitanConfig.VolumeMultiplier
-        sound:Play()
-    end
-end
-
--- Фоновый поток-сканер
-task.spawn(function()
-    while true do
-        if TitanConfig.Enabled then
-            for _, obj in pairs(game:GetDescendants()) do
-                pcall(patchSound, obj)
+-- Сканирование только при включении (без лагающих циклов)
+local function scanAllActiveSounds()
+    local services = {game:GetService("SoundService"), workspace, LocalPlayer:FindFirstChild("PlayerGui")}
+    for _, service in ipairs(services) do
+        if service then
+            for _, desc in ipairs(service:GetDescendants()) do
+                pcall(forcePatch, desc)
             end
         end
-        task.wait(TitanConfig.ScanInterval)
+    end
+end
+
+-- Отключение мода
+local function disableTitan()
+    TitanConfig.Enabled = false
+    for sound, connection in pairs(trackedSounds) do
+        if connection then connection:Disconnect() end
+        if sound and sound:IsA("Sound") then
+            pcall(function() sound:Stop() end)
+        end
+    end
+    trackedSounds = {}
+end
+
+-- Слушатель новых звуков (ивентовый метод — 0% нагрузки на ЦП)
+game.DescendantAdded:Connect(function(desc)
+    if TitanConfig.Enabled then
+        task.wait(0.1) -- Даем движку время инициализировать свойства звука
+        pcall(forcePatch, desc)
     end
 end)
 
--- --- ИНТЕРФЕЙС (GUI) ---
 
-local ScreenGui = Instance.new("ScreenGui", CoreGui)
-ScreenGui.Name = "TitanMusicMenu"
+-- =============================================================================
+-- UI ИНТЕРФЕЙС (Красивый, современный, адаптивный)
+-- =============================================================================
 
--- Кнопка для скрытия/открытия
+local targetContainer = pcall(function() return CoreGui end) and CoreGui or LocalPlayer:WaitForChild("PlayerGui")
+if targetContainer:FindFirstChild("TitanMusicSystem") then targetContainer.TitanMusicSystem:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui", targetContainer)
+ScreenGui.Name = "TitanMusicSystem"
+ScreenGui.ResetOnSpawn = false
+
+-- 🎵 Идеально круглая плавающая кнопка
 local ToggleGuiBtn = Instance.new("TextButton", ScreenGui)
 ToggleGuiBtn.Size = UDim2.new(0, 50, 0, 50)
-ToggleGuiBtn.Position = UDim2.new(0, 10, 0.5, -25)
-ToggleGuiBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+ToggleGuiBtn.Position = UDim2.new(0, 20, 0.5, -25)
+ToggleGuiBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 40)
 ToggleGuiBtn.Text = "🎵"
+ToggleGuiBtn.TextSize = 20
 ToggleGuiBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleGuiBtn.Font = Enum.Font.GothamBold
+ToggleGuiBtn.BorderSizePixel = 0
+ToggleGuiBtn.ZIndex = 10
 
--- Меню
+local ButtonCorner = Instance.new("UICorner", ToggleGuiBtn)
+ButtonCorner.CornerRadius = UDim.new(1, 0) -- Делает круглым
+
+local ButtonStroke = Instance.new("UIStroke", ToggleGuiBtn)
+ButtonStroke.Color = Color3.fromRGB(80, 80, 90)
+ButtonStroke.Width = 2
+
+-- Скрипт перетаскивания кнопки (Поддерживает пальцы на телефоне)
+local dragging, dragInput, dragStart, startPos
+local function updateDrag(input)
+    local delta = input.Position - dragStart
+    ToggleGuiBtn.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+
+ToggleGuiBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = ToggleGuiBtn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+ToggleGuiBtn.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then updateDrag(input) end
+end)
+
+
+-- Главное красивое меню
 local MainFrame = Instance.new("Frame", ScreenGui)
-MainFrame.Size = UDim2.new(0, 250, 0, 300)
-MainFrame.Position = UDim2.new(0.5, -125, 0.5, -150)
+MainFrame.Size = UDim2.new(0, 280, 0, 340)
+MainFrame.Position = UDim2.new(0.5, -140, 0.5, -170)
 MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+MainFrame.BorderSizePixel = 0
 MainFrame.Visible = false
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 10)
 
--- Заголовок и статус
-local Title = Instance.new("TextLabel", MainFrame)
-Title.Text = "TITAN: OFF"
-Title.Size = UDim2.new(1, 0, 0, 40)
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.BackgroundTransparency = 1
+local MainCorner = Instance.new("UICorner", MainFrame)
+MainCorner.CornerRadius = UDim.new(0, 12)
 
--- Кнопка ВКЛ/ВЫКЛ
-local PowerBtn = Instance.new("TextButton", MainFrame)
-PowerBtn.Size = UDim2.new(0, 200, 0, 40)
-PowerBtn.Position = UDim2.new(0.5, -100, 0.2, 0)
-PowerBtn.Text = "ВКЛ / ВЫКЛ"
-PowerBtn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
-Instance.new("UICorner", PowerBtn).CornerRadius = UDim.new(0, 6)
+local MainStroke = Instance.new("UIStroke", MainFrame)
+MainStroke.Color = Color3.fromRGB(45, 45, 50)
+MainStroke.Width = 1
 
--- Список песен
-local ScrollList = Instance.new("ScrollingFrame", MainFrame)
-ScrollList.Size = UDim2.new(0, 220, 0, 120)
-ScrollList.Position = UDim2.new(0.5, -110, 0.5, 20)
-ScrollList.CanvasSize = UDim2.new(0,0,2,0)
-
--- Логика переключения меню
-ToggleGuiBtn.MouseButton1Click:Connect(function() MainFrame.Visible = not MainFrame.Visible end)
-
--- Логика кнопки питания
-PowerBtn.MouseButton1Click:Connect(function()
-    TitanConfig.Enabled = not TitanConfig.Enabled
-    if TitanConfig.Enabled then
-        Title.Text = "TITAN: ON"
-        PowerBtn.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
-    else
-        Title.Text = "TITAN: OFF"
-        PowerBtn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
-        stopAllManagedSounds()
+-- Логика скрытия/открытия панели
+ToggleGuiBtn.MouseButton1Click:Connect(function()
+    if not dragging then -- Защита от открытия при перетаскивании
+        MainFrame.Visible = not MainFrame.Visible
     end
 end)
 
--- Обновление списка
-local function refresh()
-    ScrollList:ClearAllChildren()
+-- Заголовок меню
+local Header = Instance.new("TextLabel", MainFrame)
+Header.Size = UDim2.new(1, 0, 0, 40)
+Header.Text = "TITAN AUDIO RULER"
+Header.TextColor3 = Color3.fromRGB(255, 255, 255)
+Header.Font = Enum.Font.GothamBold
+Header.TextSize = 14
+Header.BackgroundTransparency = 1
+
+-- Кнопка ПИТАНИЯ (ВКЛ / ВЫКЛ)
+local PowerBtn = Instance.new("TextButton", MainFrame)
+PowerBtn.Size = UDim2.new(1, -30, 0, 40)
+PowerBtn.Position = UDim2.new(0, 15, 0, 50)
+PowerBtn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+PowerBtn.Text = "СИСТЕМА: ВЫКЛЕНА"
+PowerBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+PowerBtn.Font = Enum.Font.GothamBold
+PowerBtn.TextSize = 12
+Instance.new("UICorner", PowerBtn).CornerRadius = UDim.new(0, 8)
+
+-- Список треков
+local ListTitle = Instance.new("TextLabel", MainFrame)
+ListTitle.Size = UDim2.new(1, -30, 0, 20)
+ListTitle.Position = UDim2.new(0, 15, 0, 105)
+ListTitle.Text = "Выбери свой MP3 трек:"
+ListTitle.TextColor3 = Color3.fromRGB(150, 150, 155)
+ListTitle.Font = Enum.Font.GothamMedium
+ListTitle.TextSize = 11
+ListTitle.TextXAlignment = Enum.TextXAlignment.Left
+ListTitle.BackgroundTransparency = 1
+
+local ScrollList = Instance.new("ScrollingFrame", MainFrame)
+ScrollList.Size = UDim2.new(1, -30, 0, 180)
+ScrollList.Position = UDim2.new(0, 15, 0, 130)
+ScrollList.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+ScrollList.BorderSizePixel = 0
+ScrollList.ScrollBarThickness = 2
+ScrollList.CanvasSize = UDim2.new(0, 0, 0, 0)
+Instance.new("UICorner", ScrollList).CornerRadius = UDim.new(0, 6)
+
+local UIListLayout = Instance.new("UIListLayout", ScrollList)
+UIListLayout.Padding = UDim.new(0, 5)
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Обновление списка MP3
+local function refreshUiList()
+    for _, child in ipairs(ScrollList:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    
     local files = getMp3Files()
+    ScrollList.CanvasSize = UDim2.new(0, 0, 0, #files * 35)
+    
     for _, file in ipairs(files) do
-        local btn = Instance.new("TextButton", ScrollList)
-        btn.Size = UDim2.new(1, 0, 0, 30)
-        btn.Text = file
-        btn.MouseButton1Click:Connect(function()
+        local SongBtn = Instance.new("TextButton", ScrollList)
+        SongBtn.Size = UDim2.new(1, -4, 0, 30)
+        SongBtn.BackgroundColor3 = (TitanConfig.CurrentSong == file) and Color3.fromRGB(52, 152, 219) or Color3.fromRGB(25, 25, 30)
+        SongBtn.Text = "  " .. file:sub(1, 30) -- Обрезка длинных имен
+        SongBtn.TextColor3 = Color3.fromRGB(230, 230, 235)
+        SongBtn.Font = Enum.Font.Gotham
+        SongBtn.TextSize = 11
+        SongBtn.TextXAlignment = Enum.TextXAlignment.Left
+        Instance.new("UICorner", SongBtn).CornerRadius = UDim.new(0, 4)
+        
+        SongBtn.MouseButton1Click:Connect(function()
             TitanConfig.CurrentSong = file
-            stopAllManagedSounds() -- Смена трека = остановка старого
+            refreshUiList()
+            if TitanConfig.Enabled then
+                scanAllActiveSounds() -- Сразу пушим новый трек, если мод активен
+            end
         end)
     end
 end
-refresh()
 
-print("👑 [TITAN ONLINE]: Меню загружено.")
+-- Работа кнопки питания
+PowerBtn.MouseButton1Click:Connect(function()
+    if not TitanConfig.Enabled then
+        if TitanConfig.CurrentSong == "" then
+            PowerBtn.Text = "СНАЧАЛА ВЫБЕРИ ТРЕК!"
+            task.wait(1)
+            PowerBtn.Text = "СИСТЕМА: ВЫКЛЕНА"
+            return
+        end
+        TitanConfig.Enabled = true
+        PowerBtn.Text = "СИСТЕМА: АКТИВНА"
+        PowerBtn.BackgroundColor3 = Color3.fromRGB(46, 204, 113)
+        scanAllActiveSounds() -- Моментальный форсированный старт музыки
+    else
+        disableTitan()
+        PowerBtn.Text = "СИСТЕМА: ВЫКЛЕНА"
+        PowerBtn.BackgroundColor3 = Color3.fromRGB(231, 76, 60)
+    end
+end)
 
+refreshUiList()
